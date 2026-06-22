@@ -19,6 +19,18 @@ enum { F_CHAP_UP, F_CHAP_DN, F_PAGE_UP, F_PAGE_DN, F_CURSOR, F_CDI, F_OBS,
        F_MSG, F_FPL, F_VNAV, F_PROC, F_DIRECT, F_MENU, F_CLR, F_ENT,
        F_ZOOM_IN, F_ZOOM_OUT, F_NSLOTS };
 
+/* ---- condition model (shared by LEDs and the K_CMDMAP knob gate) ---------- */
+/* A condition compares a dataref to a number: "<dref> [<op> <num>]" (op:
+ * >  >=  <  <=  ==  !=  &  !& ; a bare dataref means "!= 0"). A cond_set is one
+ * or more conditions AND-ed together, written "<cond> && <cond> && ..." in the
+ * INI. Used both for LED lighting and for the conditional knob override (so a
+ * mode like KAP140 "VS active" = servos_on && altitude_hold_status == 0 can be
+ * expressed, which no single stock dataref captures). */
+enum { OP_TRUE, OP_GT, OP_GE, OP_LT, OP_LE, OP_EQ, OP_NE, OP_AND, OP_NAND };
+typedef struct { XPLMDataRef dref; int op; double rhs; } cond_t;
+#define MAX_CONDS 4
+typedef struct { cond_t c[MAX_CONDS]; int n; } cond_set;
+
 typedef struct {
   kind_t kind;
 
@@ -55,11 +67,10 @@ typedef struct {
   XPLMCommandRef m_btn_ap, m_btn_hdg, m_btn_nav, m_btn_apr, m_btn_alt, m_btn_vs;
   XPLMCommandRef m_btn_d, m_btn_menu, m_btn_clr, m_btn_ent;
 
-  /* Optional conditional knob override: when the condition is met, the knobs
-   * pulse these commands instead (e.g. KAP140 alt knob -> VS up/dn in VS mode).
-   * Condition: (cond_dref & cond_mask) != 0, or (cond_dref != 0) if mask is 0. */
-  XPLMDataRef    c_cond_dref;
-  int            c_cond_mask;
+  /* Optional conditional knob override: while c_cond holds, the knobs pulse
+   * these commands instead (e.g. KAP140 alt-preselect knob -> VS up/dn while the
+   * AP is engaged in VS mode). */
+  cond_set       c_cond;
   XPLMCommandRef c_large_inc, c_large_dec, c_small_inc, c_small_dec;
 
   /* Optional SHIFT+rotate override (any function kind): while SHIFT is held the
@@ -68,10 +79,23 @@ typedef struct {
 } func_binding;
 
 static func_binding g_bind[FN_COUNT];
-static XPLMDataRef  g_led_ap_state;
-static XPLMDataRef  g_led_approach;
 static char         g_dir[512];
 static char         g_loaded[320];
+
+/* ---- LED model ----------------------------------------------------------- */
+/* Two ways to drive the six Octavi LEDs (bits AP=1 HDG=2 NAV=4 APR=8 ALT=16
+ * VS=32):
+ *  - Legacy stock form: a single autopilot_state bitfield decoded in C
+ *    (octavi_led_value), used by the stock C172. Selected by an "ap_state" key.
+ *  - Per-LED form: each LED has its own cond_set (keys ap/hdg/nav/apr/alt/vs),
+ *    lit when all its conditions hold. Needed for study-level autopilots (e.g.
+ *    the KAP140) that don't follow X-Plane's stock autopilot_state bit layout. */
+static XPLMDataRef  g_led_ap_state;   /* legacy form */
+static XPLMDataRef  g_led_approach;
+static int          g_led_legacy;
+static cond_set     g_led[6];         /* per-LED form: 0=AP 1=HDG 2=NAV 3=APR 4=ALT 5=VS */
+static const int    g_led_bit[6] = { 1, 2, 4, 8, 16, 32 };
+static int          g_led_any;        /* any per-LED cond defined */
 
 /* Press-and-hold support. Study-level aircraft model their buttons as
  * press-and-hold manipulators (ATTR_manip_command hand: CommandBegin on press,
@@ -182,10 +206,75 @@ static int section_fn(const char *name, kind_t *kind) {
   return -1;
 }
 
+static int cond_parse_op(const char *t) {
+  if (!strcmp(t, ">"))  return OP_GT;
+  if (!strcmp(t, ">=")) return OP_GE;
+  if (!strcmp(t, "<"))  return OP_LT;
+  if (!strcmp(t, "<=")) return OP_LE;
+  if (!strcmp(t, "==") || !strcmp(t, "=")) return OP_EQ;
+  if (!strcmp(t, "!=")) return OP_NE;
+  if (!strcmp(t, "&"))  return OP_AND;
+  if (!strcmp(t, "!&") || !strcmp(t, "~&")) return OP_NAND;
+  return -1;
+}
+
+/* Parse one "<dref> [<op> <number>]" clause (bare dref means "!= 0") into *out.
+ * Returns 1 if the dataref resolved (so the clause is usable). */
+static int cond_parse_one(char *clause, cond_t *out) {
+  char *name = strtok(clause, " \t");
+  char *op   = strtok(NULL, " \t");
+  char *num  = strtok(NULL, " \t");
+  if (!name) return 0;
+  out->dref = find_dref(name);
+  out->op   = OP_TRUE;
+  out->rhs  = 0;
+  if (op) {
+    int o = cond_parse_op(op);
+    if (o < 0) octavi_log("cond: bad operator '%s'", op);
+    else { out->op = o; out->rhs = num ? strtod(num, NULL) : 0; }
+  }
+  return out->dref != NULL;
+}
+
+/* Parse "<clause> && <clause> && ..." into a cond_set (clauses AND-ed). Splits
+ * only on the two-char "&&" so a single "&" stays usable as a bitwise operator
+ * inside a clause. Every clause's dataref must resolve, else the whole set is
+ * dropped (returns 0) so a partial condition can't fire spuriously. */
+static int cond_parse_set(const char *spec, cond_set *out) {
+  char buf[192];
+  strncpy(buf, spec, sizeof buf - 1);
+  buf[sizeof buf - 1] = '\0';
+  out->n = 0;
+  for (char *p = buf; p && *p; ) {
+    char *sep = strstr(p, "&&");
+    if (sep) *sep = '\0';
+    char *clause = trim(p);
+    if (*clause) {
+      if (out->n >= MAX_CONDS) { octavi_log("cond: too many clauses in '%s'", spec); break; }
+      if (!cond_parse_one(clause, &out->c[out->n])) { out->n = 0; return 0; }
+      out->n++;
+    }
+    p = sep ? sep + 2 : NULL;
+  }
+  return out->n > 0;
+}
+
 static void build_section(const char *section, kv_pair *kv, int nkv) {
   if (strcasecmp(section, "leds") == 0) {
-    g_led_ap_state = find_dref(kv_get(kv, nkv, "ap_state"));
-    g_led_approach = find_dref(kv_get(kv, nkv, "approach"));
+    /* Legacy stock form takes precedence when ap_state is given. */
+    const char *aps = kv_get(kv, nkv, "ap_state");
+    if (aps) {
+      g_led_ap_state = find_dref(aps);
+      g_led_approach = find_dref(kv_get(kv, nkv, "approach"));
+      g_led_legacy   = (g_led_ap_state != NULL);
+      if (g_led_legacy) return;
+    }
+    /* Per-LED conditional form (ap/hdg/nav/apr/alt/vs). */
+    static const char *keys[6] = { "ap", "hdg", "nav", "apr", "alt", "vs" };
+    for (int i = 0; i < 6; i++) {
+      const char *spec = kv_get(kv, nkv, keys[i]);
+      if (spec && cond_parse_set(spec, &g_led[i])) g_led_any = 1;
+    }
     return;
   }
   if (strcasecmp(section, "meta") == 0) return;
@@ -277,9 +366,8 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     b->m_btn_menu  = find_cmd(kv_get(kv, nkv, "btn_MENU"));
     b->m_btn_clr   = find_cmd(kv_get(kv, nkv, "btn_CLR"));
     b->m_btn_ent   = find_cmd(kv_get(kv, nkv, "btn_ENT"));
-    if (kv_get(kv, nkv, "cond_dref")) {
-      b->c_cond_dref = find_dref(kv_get(kv, nkv, "cond_dref"));
-      b->c_cond_mask = (int)strtol(kv_def(kv, nkv, "cond_mask", "0"), NULL, 0);
+    if (kv_get(kv, nkv, "cond")) {
+      cond_parse_set(kv_get(kv, nkv, "cond"), &b->c_cond);
       b->c_large_inc = find_cmd(kv_get(kv, nkv, "cond_large_inc"));
       b->c_large_dec = find_cmd(kv_get(kv, nkv, "cond_large_dec"));
       b->c_small_inc = find_cmd(kv_get(kv, nkv, "cond_small_inc"));
@@ -341,6 +429,9 @@ void profile_set_dir(const char *dir) {
 int profile_load(const char *acf_filename) {
   memset(g_bind, 0, sizeof g_bind);
   g_led_ap_state = g_led_approach = NULL;
+  g_led_legacy = 0;
+  g_led_any = 0;
+  memset(g_led, 0, sizeof g_led);
   g_loaded[0] = '\0';
 
   /* "Cessna_172SP.acf" -> "Cessna_172SP" */
@@ -369,11 +460,53 @@ const char *profile_name(void) {
   return g_loaded[0] ? g_loaded : NULL;
 }
 
+/* Read a numeric dataref as a double regardless of its int/float/double type. */
+static double cond_read(XPLMDataRef d) {
+  XPLMDataTypeID t = XPLMGetDataRefTypes(d);
+  if (t & xplmType_Int)    return (double)XPLMGetDatai(d);
+  if (t & xplmType_Float)  return (double)XPLMGetDataf(d);
+  if (t & xplmType_Double) return XPLMGetDatad(d);
+  return 0;
+}
+
+static int cond_one(const cond_t *c) {
+  if (!c->dref) return 0;
+  if (c->op == OP_AND || c->op == OP_NAND) {
+    int hit = ((int)cond_read(c->dref) & (int)c->rhs) != 0;
+    return c->op == OP_AND ? hit : !hit;
+  }
+  double v = cond_read(c->dref);
+  switch (c->op) {
+  case OP_GT: return v >  c->rhs;
+  case OP_GE: return v >= c->rhs;
+  case OP_LT: return v <  c->rhs;
+  case OP_LE: return v <= c->rhs;
+  case OP_EQ: return v == c->rhs;
+  case OP_NE: return v != c->rhs;
+  default:    return v != 0;   /* OP_TRUE */
+  }
+}
+
+/* A cond_set holds iff it has at least one clause and all clauses are true. */
+static int cond_holds(const cond_set *s) {
+  if (s->n <= 0) return 0;
+  for (int i = 0; i < s->n; i++)
+    if (!cond_one(&s->c[i])) return 0;
+  return 1;
+}
+
 int profile_led_value(void) {
-  if (!g_led_ap_state) return -1;
-  int ap_state = XPLMGetDatai(g_led_ap_state);
-  int approach = g_led_approach ? XPLMGetDatai(g_led_approach) : 0;
-  return octavi_led_value(ap_state, approach);
+  if (g_led_legacy) {
+    if (!g_led_ap_state) return -1;
+    int ap_state = XPLMGetDatai(g_led_ap_state);
+    int approach = g_led_approach ? XPLMGetDatai(g_led_approach) : 0;
+    return octavi_led_value(ap_state, approach);
+  }
+  if (!g_led_any) return -1;
+  int led = 0;
+  for (int i = 0; i < 6; i++)
+    if (cond_holds(&g_led[i])) led |= g_led_bit[i];
+  return led;
 }
 
 void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *prev) {
@@ -475,11 +608,7 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
   case K_CMDMAP:
     /* Knob detents are single-activation manipulators -> CommandOnce is right.
      * Buttons are press-and-hold manipulators -> begin on press, end on release. */
-    int cond_on = 0;
-    if (b->c_cond_dref) {
-      int cv = XPLMGetDatai(b->c_cond_dref);
-      cond_on = b->c_cond_mask ? ((cv & b->c_cond_mask) != 0) : (cv != 0);
-    }
+    int cond_on = cond_holds(&b->c_cond);
     if (cond_on) {
       /* Conditional override active (e.g. VS mode): pulse the alt commands.
        * These target press-and-hold buttons, so a pulse (begin..hold..end). */
