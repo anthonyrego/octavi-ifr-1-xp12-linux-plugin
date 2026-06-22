@@ -101,7 +101,7 @@ static float flight_loop(float elapsed, float since_loop, int counter, void *ref
 PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   strcpy(name, "Octavi IFR-1");
   strcpy(sig,  "octavi.ifr1.linux");
-  strcpy(desc, "Native Octavi IFR-1 driver for X-Plane 12 on Linux (no FlyWithLua).");
+  strcpy(desc, "Native Octavi IFR-1 driver for X-Plane 12 on Linux.");
 
   /* Locate the profiles directory that sits next to the .xpl:
    * .../plugins/Octavi/lin_x64/Octavi.xpl -> .../plugins/Octavi/profiles */
