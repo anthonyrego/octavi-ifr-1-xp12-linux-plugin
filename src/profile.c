@@ -54,6 +54,11 @@ typedef struct {
   XPLMCommandRef m_knob, m_shift;
   XPLMCommandRef m_btn_ap, m_btn_hdg, m_btn_nav, m_btn_apr, m_btn_alt, m_btn_vs;
   XPLMCommandRef m_btn_d, m_btn_menu, m_btn_clr, m_btn_ent;
+
+  /* Optional conditional knob override: when cond_dref is non-zero, the knobs
+   * pulse these commands instead (e.g. KAP140 alt knob -> VS up/dn in VS mode). */
+  XPLMDataRef    c_cond_dref;
+  XPLMCommandRef c_large_inc, c_large_dec, c_small_inc, c_small_dec;
 } func_binding;
 
 static func_binding g_bind[FN_COUNT];
@@ -88,6 +93,19 @@ static void cmd_up(XPLMCommandRef c) {
   if (!c) return;
   for (int i = 0; i < MAX_HELD; i++)
     if (g_held[i].cmd == c) { g_held[i].down = 0; return; }
+}
+
+/* One held pulse (begin, auto-release after HOLD_MIN). For driving a
+ * press-and-hold button command from a momentary knob detent, which has no
+ * physical release of its own. Repeated detents within the window refresh it. */
+static void cmd_pulse(XPLMCommandRef c) {
+  if (!c) return;
+  for (int i = 0; i < MAX_HELD; i++)
+    if (g_held[i].cmd == c) { g_held[i].age = 0.0f; g_held[i].down = 0; return; }
+  XPLMCommandBegin(c);
+  for (int i = 0; i < MAX_HELD; i++)
+    if (!g_held[i].cmd) { g_held[i].cmd = c; g_held[i].age = 0.0f; g_held[i].down = 0; return; }
+  XPLMCommandEnd(c);
 }
 
 void profile_tick(float dt) {
@@ -253,6 +271,13 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     b->m_btn_menu  = find_cmd(kv_get(kv, nkv, "btn_MENU"));
     b->m_btn_clr   = find_cmd(kv_get(kv, nkv, "btn_CLR"));
     b->m_btn_ent   = find_cmd(kv_get(kv, nkv, "btn_ENT"));
+    if (kv_get(kv, nkv, "cond_dref")) {
+      b->c_cond_dref = find_dref(kv_get(kv, nkv, "cond_dref"));
+      b->c_large_inc = find_cmd(kv_get(kv, nkv, "cond_large_inc"));
+      b->c_large_dec = find_cmd(kv_get(kv, nkv, "cond_large_dec"));
+      b->c_small_inc = find_cmd(kv_get(kv, nkv, "cond_small_inc"));
+      b->c_small_dec = find_cmd(kv_get(kv, nkv, "cond_small_dec"));
+    }
     break;
   default: break;
   }
@@ -425,10 +450,19 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
   case K_CMDMAP:
     /* Knob detents are single-activation manipulators -> CommandOnce is right.
      * Buttons are press-and-hold manipulators -> begin on press, end on release. */
-    if (L > 0 && b->m_large_inc)        XPLMCommandOnce(b->m_large_inc);
-    else if (L < 0 && b->m_large_dec)   XPLMCommandOnce(b->m_large_dec);
-    if (S > 0 && b->m_small_inc)        XPLMCommandOnce(b->m_small_inc);
-    else if (S < 0 && b->m_small_dec)   XPLMCommandOnce(b->m_small_dec);
+    if (b->c_cond_dref && XPLMGetDatai(b->c_cond_dref) != 0) {
+      /* Conditional override active (e.g. VS mode): pulse the alt commands.
+       * These target press-and-hold buttons, so a pulse (begin..hold..end). */
+      if (L > 0)      cmd_pulse(b->c_large_inc);
+      else if (L < 0) cmd_pulse(b->c_large_dec);
+      if (S > 0)      cmd_pulse(b->c_small_inc);
+      else if (S < 0) cmd_pulse(b->c_small_dec);
+    } else {
+      if (L > 0 && b->m_large_inc)      XPLMCommandOnce(b->m_large_inc);
+      else if (L < 0 && b->m_large_dec) XPLMCommandOnce(b->m_large_dec);
+      if (S > 0 && b->m_small_inc)      XPLMCommandOnce(b->m_small_inc);
+      else if (S < 0 && b->m_small_dec) XPLMCommandOnce(b->m_small_dec);
+    }
 #define PRESS(field, cmd) \
     do { if (cur->field && !prev->field) cmd_down(cmd); \
          else if (!cur->field && prev->field) cmd_up(cmd); } while (0)
