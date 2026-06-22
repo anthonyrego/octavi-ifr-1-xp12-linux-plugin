@@ -11,7 +11,8 @@
 
 /* ---- binding model ------------------------------------------------------- */
 
-typedef enum { K_NONE, K_FREQ, K_WRAP360, K_KNOBCMD, K_OCTAL, K_AP, K_FMS } kind_t;
+typedef enum { K_NONE, K_FREQ, K_WRAP360, K_KNOBCMD, K_OCTAL, K_AP, K_FMS,
+               K_CMDMAP } kind_t;
 
 /* FMS command slots. */
 enum { F_CHAP_UP, F_CHAP_DN, F_PAGE_UP, F_PAGE_DN, F_CURSOR, F_CDI, F_OBS,
@@ -46,6 +47,13 @@ typedef struct {
 
   /* K_FMS */
   XPLMCommandRef fms[F_NSLOTS];
+
+  /* K_CMDMAP (type = cmd): every input fires a command. For study-level
+   * aircraft whose knobs/buttons are their own commands (not stock datarefs). */
+  XPLMCommandRef m_large_inc, m_large_dec, m_small_inc, m_small_dec;
+  XPLMCommandRef m_knob, m_shift;
+  XPLMCommandRef m_btn_ap, m_btn_hdg, m_btn_nav, m_btn_apr, m_btn_alt, m_btn_vs;
+  XPLMCommandRef m_btn_d, m_btn_menu, m_btn_clr, m_btn_ent;
 } func_binding;
 
 static func_binding g_bind[FN_COUNT];
@@ -123,6 +131,10 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
   int fn = section_fn(section, &kind);
   if (fn < 0) { octavi_log("unknown profile section: [%s]", section); return; }
 
+  /* "type = cmd" overrides the name-based default with the generic command map. */
+  const char *type = kv_get(kv, nkv, "type");
+  if (type && strcasecmp(type, "cmd") == 0) kind = K_CMDMAP;
+
   func_binding *b = &g_bind[fn];
   memset(b, 0, sizeof *b);
   b->kind = kind;
@@ -184,6 +196,24 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     b->fms[F_ENT]      = find_cmd(kv_get(kv, nkv, "ent"));
     b->fms[F_ZOOM_IN]  = find_cmd(kv_get(kv, nkv, "zoom_in"));
     b->fms[F_ZOOM_OUT] = find_cmd(kv_get(kv, nkv, "zoom_out"));
+    break;
+  case K_CMDMAP:
+    b->m_large_inc = find_cmd(kv_get(kv, nkv, "large_inc"));
+    b->m_large_dec = find_cmd(kv_get(kv, nkv, "large_dec"));
+    b->m_small_inc = find_cmd(kv_get(kv, nkv, "small_inc"));
+    b->m_small_dec = find_cmd(kv_get(kv, nkv, "small_dec"));
+    b->m_knob      = find_cmd(kv_get(kv, nkv, "knob"));
+    b->m_shift     = find_cmd(kv_get(kv, nkv, "shift"));
+    b->m_btn_ap    = find_cmd(kv_get(kv, nkv, "btn_AP"));
+    b->m_btn_hdg   = find_cmd(kv_get(kv, nkv, "btn_HDG"));
+    b->m_btn_nav   = find_cmd(kv_get(kv, nkv, "btn_NAV"));
+    b->m_btn_apr   = find_cmd(kv_get(kv, nkv, "btn_APR"));
+    b->m_btn_alt   = find_cmd(kv_get(kv, nkv, "btn_ALT"));
+    b->m_btn_vs    = find_cmd(kv_get(kv, nkv, "btn_VS"));
+    b->m_btn_d     = find_cmd(kv_get(kv, nkv, "btn_D"));
+    b->m_btn_menu  = find_cmd(kv_get(kv, nkv, "btn_MENU"));
+    b->m_btn_clr   = find_cmd(kv_get(kv, nkv, "btn_CLR"));
+    b->m_btn_ent   = find_cmd(kv_get(kv, nkv, "btn_ENT"));
     break;
   default: break;
   }
@@ -351,6 +381,25 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
     if (EDGE(menu) && b->fms[F_MENU])   XPLMCommandOnce(b->fms[F_MENU]);
     if (EDGE(clr)  && b->fms[F_CLR])    XPLMCommandOnce(b->fms[F_CLR]);
     if (EDGE(ent)  && b->fms[F_ENT])    XPLMCommandOnce(b->fms[F_ENT]);
+    break;
+
+  case K_CMDMAP:
+    if (L > 0 && b->m_large_inc)        XPLMCommandOnce(b->m_large_inc);
+    else if (L < 0 && b->m_large_dec)   XPLMCommandOnce(b->m_large_dec);
+    if (S > 0 && b->m_small_inc)        XPLMCommandOnce(b->m_small_inc);
+    else if (S < 0 && b->m_small_dec)   XPLMCommandOnce(b->m_small_dec);
+    if (EDGE(knob)  && b->m_knob)     XPLMCommandOnce(b->m_knob);
+    if (EDGE(shift) && b->m_shift)    XPLMCommandOnce(b->m_shift);
+    if (EDGE(ap)    && b->m_btn_ap)   XPLMCommandOnce(b->m_btn_ap);
+    if (EDGE(hdg)   && b->m_btn_hdg)  XPLMCommandOnce(b->m_btn_hdg);
+    if (EDGE(nav)   && b->m_btn_nav)  XPLMCommandOnce(b->m_btn_nav);
+    if (EDGE(apr)   && b->m_btn_apr)  XPLMCommandOnce(b->m_btn_apr);
+    if (EDGE(alt)   && b->m_btn_alt)  XPLMCommandOnce(b->m_btn_alt);
+    if (EDGE(vs)    && b->m_btn_vs)   XPLMCommandOnce(b->m_btn_vs);
+    if (EDGE(d)     && b->m_btn_d)    XPLMCommandOnce(b->m_btn_d);
+    if (EDGE(menu)  && b->m_btn_menu) XPLMCommandOnce(b->m_btn_menu);
+    if (EDGE(clr)   && b->m_btn_clr)  XPLMCommandOnce(b->m_btn_clr);
+    if (EDGE(ent)   && b->m_btn_ent)  XPLMCommandOnce(b->m_btn_ent);
     break;
 
   default:
