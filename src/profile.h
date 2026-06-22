@@ -32,4 +32,10 @@ void profile_dispatch(int fn_id, const octavi_report *cur, const octavi_report *
  * profile has no usable [leds] section. */
 int profile_led_value(void);
 
+/* Advance held-command timers; call once per frame with the elapsed seconds.
+ * Some aircraft (e.g. study-level) ignore an instantaneous command and need a
+ * brief press-and-hold; profile_dispatch begins such commands and this ends
+ * them a few ms later (self-releasing, independent of the active function). */
+void profile_tick(float dt);
+
 #endif /* PROFILE_H */

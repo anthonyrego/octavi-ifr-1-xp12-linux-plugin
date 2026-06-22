@@ -64,6 +64,9 @@ static float flight_loop(float elapsed, float since_loop, int counter, void *ref
 
   if (!g_profile_loaded) reload_profile();
 
+  /* Release any held (press-and-hold) commands whose timer has elapsed. */
+  profile_tick(elapsed);
+
   if (g_fd < 0) {
     g_reopen_acc += elapsed;
     if (g_reopen_acc >= 2.0f) { g_reopen_acc = 0.0f; try_open_device(); }

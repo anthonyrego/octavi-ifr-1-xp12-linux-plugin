@@ -62,6 +62,33 @@ static XPLMDataRef  g_led_approach;
 static char         g_dir[512];
 static char         g_loaded[320];
 
+/* Press-and-hold support: a command begun by cmd_press() stays active for
+ * HOLD_SECS, then profile_tick() ends it. This makes momentary buttons behave
+ * like a real cockpit click (begin -> hold -> end), which study-level aircraft
+ * require; an instantaneous XPLMCommandOnce is ignored by them. */
+#define MAX_HELD  16
+#define HOLD_SECS 0.06f
+static struct { XPLMCommandRef cmd; float t; } g_held[MAX_HELD];
+
+static void cmd_press(XPLMCommandRef c) {
+  if (!c) return;
+  for (int i = 0; i < MAX_HELD; i++)            /* already held -> just extend */
+    if (g_held[i].cmd == c) { g_held[i].t = HOLD_SECS; return; }
+  XPLMCommandBegin(c);
+  for (int i = 0; i < MAX_HELD; i++)
+    if (!g_held[i].cmd) { g_held[i].cmd = c; g_held[i].t = HOLD_SECS; return; }
+  XPLMCommandEnd(c);                            /* table full: don't get stuck */
+}
+
+void profile_tick(float dt) {
+  for (int i = 0; i < MAX_HELD; i++) {
+    if (g_held[i].cmd) {
+      g_held[i].t -= dt;
+      if (g_held[i].t <= 0.0f) { XPLMCommandEnd(g_held[i].cmd); g_held[i].cmd = NULL; }
+    }
+  }
+}
+
 /* ---- resolution helpers -------------------------------------------------- */
 
 static XPLMDataRef find_dref(const char *name) {
@@ -384,22 +411,24 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
     break;
 
   case K_CMDMAP:
+    /* Knob detents are single-activation manipulators -> CommandOnce is right.
+     * Buttons are press-and-hold manipulators -> cmd_press (begin..hold..end). */
     if (L > 0 && b->m_large_inc)        XPLMCommandOnce(b->m_large_inc);
     else if (L < 0 && b->m_large_dec)   XPLMCommandOnce(b->m_large_dec);
     if (S > 0 && b->m_small_inc)        XPLMCommandOnce(b->m_small_inc);
     else if (S < 0 && b->m_small_dec)   XPLMCommandOnce(b->m_small_dec);
-    if (EDGE(knob)  && b->m_knob)     XPLMCommandOnce(b->m_knob);
-    if (EDGE(shift) && b->m_shift)    XPLMCommandOnce(b->m_shift);
-    if (EDGE(ap)    && b->m_btn_ap)   XPLMCommandOnce(b->m_btn_ap);
-    if (EDGE(hdg)   && b->m_btn_hdg)  XPLMCommandOnce(b->m_btn_hdg);
-    if (EDGE(nav)   && b->m_btn_nav)  XPLMCommandOnce(b->m_btn_nav);
-    if (EDGE(apr)   && b->m_btn_apr)  XPLMCommandOnce(b->m_btn_apr);
-    if (EDGE(alt)   && b->m_btn_alt)  XPLMCommandOnce(b->m_btn_alt);
-    if (EDGE(vs)    && b->m_btn_vs)   XPLMCommandOnce(b->m_btn_vs);
-    if (EDGE(d)     && b->m_btn_d)    XPLMCommandOnce(b->m_btn_d);
-    if (EDGE(menu)  && b->m_btn_menu) XPLMCommandOnce(b->m_btn_menu);
-    if (EDGE(clr)   && b->m_btn_clr)  XPLMCommandOnce(b->m_btn_clr);
-    if (EDGE(ent)   && b->m_btn_ent)  XPLMCommandOnce(b->m_btn_ent);
+    if (EDGE(knob))  cmd_press(b->m_knob);
+    if (EDGE(shift)) cmd_press(b->m_shift);
+    if (EDGE(ap))    cmd_press(b->m_btn_ap);
+    if (EDGE(hdg))   cmd_press(b->m_btn_hdg);
+    if (EDGE(nav))   cmd_press(b->m_btn_nav);
+    if (EDGE(apr))   cmd_press(b->m_btn_apr);
+    if (EDGE(alt))   cmd_press(b->m_btn_alt);
+    if (EDGE(vs))    cmd_press(b->m_btn_vs);
+    if (EDGE(d))     cmd_press(b->m_btn_d);
+    if (EDGE(menu))  cmd_press(b->m_btn_menu);
+    if (EDGE(clr))   cmd_press(b->m_btn_clr);
+    if (EDGE(ent))   cmd_press(b->m_btn_ent);
     break;
 
   default:
