@@ -55,9 +55,11 @@ typedef struct {
   XPLMCommandRef m_btn_ap, m_btn_hdg, m_btn_nav, m_btn_apr, m_btn_alt, m_btn_vs;
   XPLMCommandRef m_btn_d, m_btn_menu, m_btn_clr, m_btn_ent;
 
-  /* Optional conditional knob override: when cond_dref is non-zero, the knobs
-   * pulse these commands instead (e.g. KAP140 alt knob -> VS up/dn in VS mode). */
+  /* Optional conditional knob override: when the condition is met, the knobs
+   * pulse these commands instead (e.g. KAP140 alt knob -> VS up/dn in VS mode).
+   * Condition: (cond_dref & cond_mask) != 0, or (cond_dref != 0) if mask is 0. */
   XPLMDataRef    c_cond_dref;
+  int            c_cond_mask;
   XPLMCommandRef c_large_inc, c_large_dec, c_small_inc, c_small_dec;
 
   /* Optional SHIFT+rotate override (any function kind): while SHIFT is held the
@@ -277,6 +279,7 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     b->m_btn_ent   = find_cmd(kv_get(kv, nkv, "btn_ENT"));
     if (kv_get(kv, nkv, "cond_dref")) {
       b->c_cond_dref = find_dref(kv_get(kv, nkv, "cond_dref"));
+      b->c_cond_mask = (int)strtol(kv_def(kv, nkv, "cond_mask", "0"), NULL, 0);
       b->c_large_inc = find_cmd(kv_get(kv, nkv, "cond_large_inc"));
       b->c_large_dec = find_cmd(kv_get(kv, nkv, "cond_large_dec"));
       b->c_small_inc = find_cmd(kv_get(kv, nkv, "cond_small_inc"));
@@ -472,7 +475,12 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
   case K_CMDMAP:
     /* Knob detents are single-activation manipulators -> CommandOnce is right.
      * Buttons are press-and-hold manipulators -> begin on press, end on release. */
-    if (b->c_cond_dref && XPLMGetDatai(b->c_cond_dref) != 0) {
+    int cond_on = 0;
+    if (b->c_cond_dref) {
+      int cv = XPLMGetDatai(b->c_cond_dref);
+      cond_on = b->c_cond_mask ? ((cv & b->c_cond_mask) != 0) : (cv != 0);
+    }
+    if (cond_on) {
       /* Conditional override active (e.g. VS mode): pulse the alt commands.
        * These target press-and-hold buttons, so a pulse (begin..hold..end). */
       if (L > 0)      cmd_pulse(b->c_large_inc);
