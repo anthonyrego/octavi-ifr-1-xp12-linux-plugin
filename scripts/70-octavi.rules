@@ -1,0 +1,13 @@
+# Octavi IFR-1: grant the logged-in user read/write access to the HID device.
+#
+# Read access lets the plugin read button/knob state; write access lets it
+# update the LEDs. Install with:
+#
+#   sudo cp scripts/70-octavi.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Note: on many desktop systems game-controller-class HID devices are already
+# granted 0666 by a system rule, so this may be unnecessary - check with:
+#   ls -l /dev/hidrawN   (find N via the device name in /sys/class/hidraw/*/device/uevent)
+
+KERNEL=="hidraw*", ATTRS{idVendor}=="04d8", ATTRS{idProduct}=="e6d6", MODE="0666", TAG+="uaccess"

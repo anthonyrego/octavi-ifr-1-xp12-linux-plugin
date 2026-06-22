@@ -1,0 +1,14 @@
+# build output
+build/
+
+# downloaded XPLM SDK + downloads (fetched by scripts/fetch-sdk.sh)
+sdk/
+downloads/
+
+# the reference FlyWithLua repo (cloned for study, not part of this project)
+ref-octavi/
+
+# editor / OS cruft
+*.o
+*.swp
+.DS_Store
