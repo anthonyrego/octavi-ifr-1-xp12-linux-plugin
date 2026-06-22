@@ -59,6 +59,10 @@ typedef struct {
    * pulse these commands instead (e.g. KAP140 alt knob -> VS up/dn in VS mode). */
   XPLMDataRef    c_cond_dref;
   XPLMCommandRef c_large_inc, c_large_dec, c_small_inc, c_small_dec;
+
+  /* Optional SHIFT+rotate override (any function kind): while SHIFT is held the
+   * knobs fire these instead (e.g. HDG bug normally, DG drift adjust with SHIFT). */
+  XPLMCommandRef sh_large_inc, sh_large_dec, sh_small_inc, sh_small_dec;
 } func_binding;
 
 static func_binding g_bind[FN_COUNT];
@@ -281,6 +285,12 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     break;
   default: break;
   }
+
+  /* SHIFT+rotate override (optional, applies to any function kind). */
+  b->sh_large_inc = find_cmd(kv_get(kv, nkv, "shift_large_inc"));
+  b->sh_large_dec = find_cmd(kv_get(kv, nkv, "shift_large_dec"));
+  b->sh_small_inc = find_cmd(kv_get(kv, nkv, "shift_small_inc"));
+  b->sh_small_dec = find_cmd(kv_get(kv, nkv, "shift_small_dec"));
 }
 
 static void parse_ini(FILE *f) {
@@ -367,6 +377,18 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
   if (fn < 0 || fn >= FN_COUNT) return;
   func_binding *b = &g_bind[fn];
   int L = cur->large_delta, S = cur->small_delta;
+
+  /* SHIFT+rotate override (e.g. DG drift adjust on the HDG knob): while SHIFT is
+   * held, the rotation drives the shift-knob commands and is consumed, so the
+   * function's normal knob action does not also fire. */
+  if (cur->shift && (b->sh_large_inc || b->sh_large_dec || b->sh_small_inc || b->sh_small_dec)) {
+    if (L > 0 && b->sh_large_inc)      XPLMCommandOnce(b->sh_large_inc);
+    else if (L < 0 && b->sh_large_dec) XPLMCommandOnce(b->sh_large_dec);
+    if (S > 0 && b->sh_small_inc)      XPLMCommandOnce(b->sh_small_inc);
+    else if (S < 0 && b->sh_small_dec) XPLMCommandOnce(b->sh_small_dec);
+    L = 0;
+    S = 0;
+  }
 
 #define EDGE(field) (cur->field && !prev->field)
 
