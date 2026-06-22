@@ -3,8 +3,11 @@
 A standalone X-Plane 12 plugin (XPLM, written in C) that makes the
 **Octavi IFR-1** fully usable on **Linux** — with **no FlyWithLua** and no
 in-game overlay. The device is read directly over `hidraw`; inputs are mapped to
-the sim through **per-aircraft INI profiles**. Ships with a profile for the
-default **Cessna 172 SP (analog)**.
+the sim through **per-aircraft INI profiles**. Ships with a tuned profile for the
+default **Cessna 172 SP (analog)** plus a generic **`_default.ini`** fallback
+that drives the stock avionics (COM/NAV/XPDR/heading/baro/OBS/autopilot) on any
+aircraft that has no profile of its own — so the default GA fleet (172 SP &
+seaplane, Baron 58, Cirrus SR22, …) works out of the box.
 
 Octavi's official drivers are Windows/macOS only. The one existing Linux option
 ([cyberang3l/octavi-xplane-flywithlua](https://github.com/cyberang3l/octavi-xplane-flywithlua))
@@ -47,7 +50,9 @@ This installs to `…/X-Plane 12/Resources/plugins/Octavi/`:
 ```
 Octavi/
 ├── lin_x64/Octavi.xpl
-└── profiles/Cessna_172SP.ini
+└── profiles/
+    ├── _default.ini        # generic stock-avionics fallback (any GA aircraft)
+    └── Cessna_172SP.ini    # tuned per-aircraft profile
 ```
 
 Start X-Plane, load the Cessna 172 SP (analog), and the device is live. Look for
@@ -111,13 +116,20 @@ and buttons then act on it. Press the centre knob to toggle primary/secondary.
 
 ## Adding another aircraft
 
-Profiles are plain INI keyed by the aircraft `.acf` file name. Copy
-`profiles/Cessna_172SP.ini` to `profiles/<YourAcfBaseName>.ini` and change the
-dataref/command strings to match that aircraft. No recompile needed — restart
-X-Plane (or reload the aircraft) and the plugin loads the matching profile. Any
-dataref/command that doesn't exist on the aircraft is logged and that single
-binding is skipped, so partial profiles still work. See the comments in
-`profiles/Cessna_172SP.ini` and the recognised section keys in `src/profile.c`.
+Profiles are plain INI keyed by the aircraft `.acf` file name. The plugin loads
+`profiles/<YourAcfBaseName>.ini` if it exists, otherwise it falls back to
+`profiles/_default.ini` (the generic stock-avionics profile). So an aircraft only
+needs its own file when the fallback isn't enough — typically a study-level plane
+that drives its avionics through custom commands (see `profiles/C172_NG_ANALOG.ini`)
+or a glass panel whose GPS/FMS isn't the stock GNS.
+
+To make one, copy `profiles/_default.ini` to `profiles/<YourAcfBaseName>.ini` and
+change the dataref/command strings to match that aircraft. No recompile needed —
+restart X-Plane (or reload the aircraft) and the plugin loads the matching
+profile (an exact-name match always wins over the fallback). Any dataref/command
+that doesn't exist on the aircraft is logged and that single binding is skipped,
+so partial profiles still work. See the recognised section keys in
+`src/profile.c`.
 
 ## Layout
 

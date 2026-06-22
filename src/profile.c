@@ -441,18 +441,31 @@ int profile_load(const char *acf_filename) {
   char *dot = strrchr(base, '.');
   if (dot && strcasecmp(dot, ".acf") == 0) *dot = '\0';
 
+  /* Prefer an exact per-aircraft profile; otherwise fall back to the generic
+   * _default.ini so any aircraft using X-Plane's stock avionics works without a
+   * hand-written file. _default binds only stock datarefs/commands, so bindings
+   * a given aircraft lacks (e.g. the GNS530/430 FMS on a G1000 panel) just fail
+   * to resolve and stay inert. An exact-name match always wins, so a real
+   * per-aircraft profile is never shadowed by the fallback. */
   char path[1024];
+  const char *name = base;
   snprintf(path, sizeof path, "%s/%s.ini", g_dir, base);
   FILE *f = fopen(path, "r");
   if (!f) {
-    octavi_log("no profile for '%s' (looked for %s) - device idle", acf_filename, path);
+    name = "_default";
+    snprintf(path, sizeof path, "%s/_default.ini", g_dir);
+    f = fopen(path, "r");
+  }
+  if (!f) {
+    octavi_log("no profile for '%s' and no _default.ini in %s - device idle",
+               acf_filename, g_dir);
     return 0;
   }
   parse_ini(f);
   fclose(f);
 
-  snprintf(g_loaded, sizeof g_loaded, "%s.ini", base);
-  octavi_log("loaded profile %s", g_loaded);
+  snprintf(g_loaded, sizeof g_loaded, "%s.ini", name);
+  octavi_log("loaded profile %s (for %s)", g_loaded, acf_filename);
   return 1;
 }
 
