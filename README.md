@@ -51,8 +51,10 @@ This installs to `…/X-Plane 12/Resources/plugins/Octavi/`:
 Octavi/
 ├── lin_x64/Octavi.xpl
 └── profiles/
-    ├── _default.ini        # generic stock-avionics fallback (any GA aircraft)
-    └── Cessna_172SP.ini    # tuned per-aircraft profile
+    ├── _default.ini             # generic stock-avionics fallback (any GA aircraft)
+    ├── Cessna_172SP.ini         # tuned profile - default 172 SP (analog)
+    ├── Cessna_172SP_G1000.ini   # default 172 G1000 (glass - g1000n* FMS)
+    └── C172_NG_ANALOG.ini       # AirfoilLabs C172 NG (study-level, custom cmds)
 ```
 
 Start X-Plane, load the Cessna 172 SP (analog), and the device is live. Look for
