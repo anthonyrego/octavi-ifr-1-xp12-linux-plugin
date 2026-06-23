@@ -2,7 +2,9 @@
 
 PLUGIN  := Octavi
 SDK     := sdk/CHeaders/XPLM
-XP      ?= /home/rego/.local/share/Steam/steamapps/common/X-Plane 12
+# X-Plane 12 install path. Leave empty to auto-detect (scripts/find-xplane.sh);
+# override for a non-standard location: make install XP="/path/to/X-Plane 12"
+XP      ?=
 
 CC      := gcc
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -fPIC -fvisibility=hidden -m64 \
@@ -18,7 +20,7 @@ HDR     := $(wildcard src/*.h)
 OUTDIR  := build/$(PLUGIN)/lin_x64
 OUT     := $(OUTDIR)/$(PLUGIN).xpl
 
-.PHONY: all clean install sdk probe
+.PHONY: all clean install install-udev sdk probe
 
 all: $(OUT)
 
@@ -33,7 +35,8 @@ $(OUT): $(SRC) $(HDR) | $(SDK)
 	@mkdir -p $(OUTDIR)
 	$(CC) $(CFLAGS) $(SRC) -o $(OUT) $(LDFLAGS)
 	@cp -r profiles build/$(PLUGIN)/
-	@echo "Built $(OUT) (+ profiles)"
+	@mkdir -p build/$(PLUGIN)/udev && cp scripts/70-octavi.rules build/$(PLUGIN)/udev/
+	@echo "Built $(OUT) (+ profiles, udev rule)"
 
 # Fetch the XPLM SDK headers if missing.
 $(SDK):
@@ -44,6 +47,10 @@ sdk:
 
 install: all
 	@./scripts/install.sh "$(XP)"
+
+# One-time: grant access to the Octavi HID device (uses sudo).
+install-udev:
+	@./scripts/install-udev.sh
 
 clean:
 	rm -rf build

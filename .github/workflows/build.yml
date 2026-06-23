@@ -1,0 +1,19 @@
+name: build
+
+# Sanity-check that the plugin and the standalone probe compile on every push/PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl unzip
+      - name: Build plugin (fetches the XPLM SDK headers)
+        run: make
+      - name: Build probe
+        run: make probe

@@ -1,0 +1,42 @@
+name: release
+
+# Build a ready-to-extract plugin zip. Pushing a version tag (e.g. v1.0.0)
+# publishes it as a GitHub Release; a manual run just uploads the build artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl unzip zip
+      - name: Build plugin
+        run: make
+      - name: Package
+        # Zips the build/Octavi/ tree so it extracts straight into
+        # X-Plane 12/Resources/plugins/  ->  plugins/Octavi/lin_x64/Octavi.xpl
+        run: cd build && zip -r ../Octavi-linux-x64.zip Octavi
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Octavi-linux-x64
+          path: Octavi-linux-x64.zip
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" Octavi-linux-x64.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Prebuilt Octavi IFR-1 plugin for X-Plane 12 (Linux x64).
+
+          **Install:** extract \`Octavi-linux-x64.zip\` into your \`X-Plane 12/Resources/plugins/\` folder, so you end up with \`.../plugins/Octavi/lin_x64/Octavi.xpl\`, then (re)start X-Plane.
+
+          If the device's knobs/LEDs don't respond, install the one-time device-access rule (see the README's *Device access* section)."

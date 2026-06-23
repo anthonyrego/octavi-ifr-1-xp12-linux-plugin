@@ -14,6 +14,27 @@ Octavi's official drivers are Windows/macOS only. The one existing Linux option
 requires the FlyWithLua runtime and draws a visual overlay. This project is a
 dependency-free reimplementation of the driver logic as a native plugin.
 
+## Quick start
+
+**Prebuilt download — no compiler needed (easiest):**
+
+1. Download `Octavi-linux-x64.zip` from the
+   [Releases](https://github.com/anthonyrego/octavi-ifr-1-xp12-linux-plugin/releases)
+   page.
+2. Extract it into your `X-Plane 12/Resources/plugins/` folder — you should end
+   up with `…/plugins/Octavi/lin_x64/Octavi.xpl`.
+3. One-time, if the knobs/LEDs don't respond: install the device-access rule
+   (see [Device access](#device-access)).
+4. Start X-Plane and load an aircraft.
+
+**Build from source:**
+
+```sh
+make               # build the plugin (fetches the SDK headers on first run)
+make install       # auto-detect X-Plane and install the plugin + profiles
+make install-udev  # one-time: grant access to the device (uses sudo)
+```
+
 ## How it works
 
 The Octavi is a USB HID device (`04d8:e6d6`) that speaks a small custom protocol:
@@ -33,17 +54,30 @@ device (hidraw) ──▶ decode ──▶ active function (selector + pri/sec)
 
 ## Requirements
 
-- X-Plane 12 on Linux (developed against 12.4).
-- A C toolchain (`gcc`, `make`) — only needed to build.
+- X-Plane 12 on **x86-64 Linux** (developed against 12.4; should work on any 12.x).
+- The Octavi IFR-1 connected over USB.
 - Read/write access to the device node (see *Device access* below).
+- A C toolchain (`gcc`, `make`) — **only if building from source**; the prebuilt
+  release needs no compiler.
 
 ## Build & install
 
 ```sh
 make          # fetches the XPLM SDK headers (first run) and builds the .xpl
-make install  # copies the plugin + profiles into X-Plane
-              # override the path with: make install XP="/path/to/X-Plane 12"
+make install  # auto-detects X-Plane and copies the plugin + profiles in
 ```
+
+`make install` finds your X-Plane 12 automatically — it reads X-Plane's own
+install record (`~/.x-plane/x-plane_install_12.txt`) and falls back to the
+common Steam / native-installer locations. If you keep X-Plane somewhere
+unusual, point it there explicitly:
+
+```sh
+make install XP="/path/to/X-Plane 12"
+```
+
+If the device's knobs/LEDs don't respond, grant access to it once with
+`make install-udev` (installs the udev rule below via `sudo`).
 
 This installs to `…/X-Plane 12/Resources/plugins/Octavi/`:
 
@@ -73,10 +107,18 @@ for d in /sys/class/hidraw/hidraw*; do
 ls -l /dev/hidrawN   # want crw-rw-rw-
 ```
 
-If it isn't writable, install the included udev rule:
+If it isn't writable, install the included udev rule. From a source checkout
+that's just:
 
 ```sh
-sudo cp scripts/70-octavi.rules /etc/udev/rules.d/
+make install-udev
+```
+
+Or do it by hand (e.g. when using the prebuilt download — the rule ships in the
+zip at `Octavi/udev/70-octavi.rules`):
+
+```sh
+sudo cp scripts/70-octavi.rules /etc/udev/rules.d/   # or Octavi/udev/70-octavi.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -133,13 +175,35 @@ that doesn't exist on the aircraft is logged and that single binding is skipped,
 so partial profiles still work. See the recognised section keys in
 `src/profile.c`.
 
+## Troubleshooting
+
+Everything the plugin does is logged to `…/X-Plane 12/Log.txt` with an `Octavi:`
+prefix — that's the first place to look. Common cases:
+
+- **Nothing happens in the sim.** Check `Log.txt` for `Octavi:` lines. No lines
+  at all → the plugin didn't load (confirm `…/Resources/plugins/Octavi/lin_x64/Octavi.xpl`
+  exists). A "device not found" line → see below.
+- **Device not found.** Confirm it's connected: `lsusb` should list
+  `04d8:e6d6`. If present but still not found, it's almost always permissions —
+  run `make install-udev` (or install the udev rule by hand) and re-plug.
+- **Knobs/buttons work but the LEDs never light** (or a permission-denied log
+  line). The device node isn't writable → install the udev rule as above; the
+  plugin needs read **and** write access.
+- **Wrong or missing mappings for an aircraft.** The plugin loads
+  `profiles/<AcfBaseName>.ini`, else `profiles/_default.ini`. `Log.txt` shows
+  which profile it loaded and lists any bindings it skipped because the
+  dataref/command doesn't exist on that aircraft. See *Adding another aircraft*.
+- **`make install` can't find X-Plane.** Auto-detection failed (unusual install
+  location); pass it explicitly: `make install XP="/path/to/X-Plane 12"`.
+
 ## Layout
 
 ```
 src/        plugin source (plugin.c, hidraw.c, octavi.c, profile.c, log.h)
 profiles/   per-aircraft INI profiles
 tools/      octavi_probe.c — standalone device tester
-scripts/    fetch-sdk.sh, install.sh, 70-octavi.rules
+scripts/    fetch-sdk.sh, install.sh, find-xplane.sh, install-udev.sh, 70-octavi.rules
+.github/    CI: build check + prebuilt-release workflow
 ```
 
 ## Credits
