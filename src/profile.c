@@ -12,7 +12,7 @@
 /* ---- binding model ------------------------------------------------------- */
 
 typedef enum { K_NONE, K_FREQ, K_WRAP360, K_KNOBCMD, K_OCTAL, K_AP, K_FMS,
-               K_CMDMAP } kind_t;
+               K_CMDMAP, K_XPDRKEYS } kind_t;
 
 /* FMS command slots. */
 enum { F_CHAP_UP, F_CHAP_DN, F_PAGE_UP, F_PAGE_DN, F_CURSOR, F_CDI, F_OBS,
@@ -52,6 +52,12 @@ typedef struct {
   /* K_OCTAL */
   XPLMDataRef    oct_dref;
 
+  /* K_XPDRKEYS (keypad transponder, e.g. GTX328): oct_dref reads the current
+   * squawk; the dials re-type the whole 4-digit code via these 0..7 digit keys.
+   * The unit has no rotary code command and ignores writes to the stock dref. */
+  XPLMCommandRef xpdr_key[8];
+  float          xpdr_interval;  /* seconds between digit presses */
+
   /* K_AP */
   XPLMDataRef    alt_dref, vs_dref;
   double         alt_step, vs_step;
@@ -63,6 +69,10 @@ typedef struct {
   /* K_CMDMAP (type = cmd): every input fires a command. For study-level
    * aircraft whose knobs/buttons are their own commands (not stock datarefs). */
   XPLMCommandRef m_large_inc, m_large_dec, m_small_inc, m_small_dec;
+  /* When set, the matching knob fires its commands as a held pulse instead of an
+   * instantaneous XPLMCommandOnce - for knob roles bound to press-and-hold button
+   * manipulators (e.g. the KAP140 UP/DN keys) that ignore a Once. */
+  int            m_large_hold, m_small_hold;
   XPLMCommandRef m_knob, m_shift;
   XPLMCommandRef m_btn_ap, m_btn_hdg, m_btn_nav, m_btn_apr, m_btn_alt, m_btn_vs;
   XPLMCommandRef m_btn_d, m_btn_menu, m_btn_clr, m_btn_ent;
@@ -74,8 +84,11 @@ typedef struct {
   XPLMCommandRef c_large_inc, c_large_dec, c_small_inc, c_small_dec;
 
   /* Optional SHIFT+rotate override (any function kind): while SHIFT is held the
-   * knobs fire these instead (e.g. HDG bug normally, DG drift adjust with SHIFT). */
+   * knobs fire these instead (e.g. HDG bug normally, DG drift adjust with SHIFT;
+   * or KAP140 altitude normally, vertical speed with SHIFT). sh_hold pulses them
+   * (press-and-hold button manipulators) instead of an instantaneous Once. */
   XPLMCommandRef sh_large_inc, sh_large_dec, sh_small_inc, sh_small_dec;
+  int            sh_hold;
 } func_binding;
 
 static func_binding g_bind[FN_COUNT];
@@ -138,6 +151,38 @@ static void cmd_pulse(XPLMCommandRef c) {
   XPLMCommandEnd(c);
 }
 
+/* Keypad transponder (K_XPDRKEYS). The GTX328 has no rotary code command - the
+ * squawk is entered as a full 4-digit keypad sequence, in order. A dial detent
+ * sets a target code; profile_tick "types" it one digit every `interval` seconds
+ * (the GTX328's code register accepts presses as fast as we send them, so this
+ * just paces the on-screen display), then re-types if the target moved mid-entry
+ * (so spinning the dial fast just lands on - and enters - the final code). */
+static struct {
+  XPLMCommandRef key[8];   /* digit-key commands 0..7 (copied from the binding) */
+  float interval;          /* seconds between digit presses (from the profile) */
+  int   target;            /* desired squawk (4 octal digits packed as decimal) */
+  int   have_target;       /* the dials have set a target since the last settle */
+  int   active;            /* a key sequence is being typed right now */
+  int   typing;            /* the code currently being typed */
+  int   digit[4];          /* its four digits, most-significant first */
+  int   idx;               /* next digit to press (0..4) */
+  float timer;             /* time since the last keypress */
+} g_xpdr;
+
+static void xpdr_emit_start(int code) {
+  if (code < 0) code = 0;
+  g_xpdr.typing   = code;
+  g_xpdr.digit[0] = (code / 1000) % 10;
+  g_xpdr.digit[1] = (code / 100)  % 10;
+  g_xpdr.digit[2] = (code / 10)   % 10;
+  g_xpdr.digit[3] =  code         % 10;
+  for (int i = 0; i < 4; i++)              /* guard the key[] index (squawk is 0..7) */
+    if (g_xpdr.digit[i] > 7) g_xpdr.digit[i] = 7;
+  g_xpdr.idx    = 0;
+  g_xpdr.timer  = g_xpdr.interval;         /* press the first digit on the next tick */
+  g_xpdr.active = 1;
+}
+
 void profile_tick(float dt) {
   for (int i = 0; i < MAX_HELD; i++) {
     if (!g_held[i].cmd) continue;
@@ -147,6 +192,41 @@ void profile_tick(float dt) {
       g_held[i].cmd = NULL;
     }
   }
+
+  /* Type the keypad-transponder sequence, one digit at a time. */
+  if (g_xpdr.active) {
+    g_xpdr.timer += dt;
+    if (g_xpdr.timer >= g_xpdr.interval) {
+      g_xpdr.timer = 0.0f;
+      XPLMCommandRef k = g_xpdr.key[g_xpdr.digit[g_xpdr.idx]];
+      if (k) XPLMCommandOnce(k);
+      if (++g_xpdr.idx >= 4) {
+        g_xpdr.active = 0;
+        if (g_xpdr.target != g_xpdr.typing) xpdr_emit_start(g_xpdr.target);
+        else                                g_xpdr.have_target = 0;  /* settled */
+      }
+    }
+  }
+}
+
+/* Fire one knob-detent command: a held pulse for press-and-hold button
+ * manipulators (hold != 0), otherwise an instantaneous Once. */
+static void fire_knob(XPLMCommandRef c, int hold) {
+  if (!c) return;
+  if (hold) cmd_pulse(c);
+  else      XPLMCommandOnce(c);
+}
+
+/* New squawk from a detent: the bottom dial (S) steps the first two octal digits
+ * as a 00..77 pair, the top dial (L) the last two; each pair wraps within itself
+ * and never carries into the other. Returns the 4 digits packed as decimal. */
+static int xpdr_apply(int code, int L, int S) {
+  int d[4] = { (code/1000)%10, (code/100)%10, (code/10)%10, code%10 };
+  for (int i = 0; i < 4; i++)              /* a squawk digit is octal (0..7) */
+    if (d[i] > 7) d[i] = 7;
+  int hi = ((d[0]*8 + d[1] + S) % 64 + 64) % 64;
+  int lo = ((d[2]*8 + d[3] + L) % 64 + 64) % 64;
+  return (hi/8)*1000 + (hi%8)*100 + (lo/8)*10 + (lo%8);
 }
 
 /* ---- resolution helpers -------------------------------------------------- */
@@ -285,7 +365,8 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
 
   /* "type = cmd" overrides the name-based default with the generic command map. */
   const char *type = kv_get(kv, nkv, "type");
-  if (type && strcasecmp(type, "cmd") == 0) kind = K_CMDMAP;
+  if (type && strcasecmp(type, "cmd") == 0)       kind = K_CMDMAP;
+  else if (type && strcasecmp(type, "keys") == 0) kind = K_XPDRKEYS;
 
   func_binding *b = &g_bind[fn];
   memset(b, 0, sizeof *b);
@@ -318,6 +399,14 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
   case K_OCTAL:
     b->oct_dref = find_dref(kv_get(kv, nkv, "dref"));
     break;
+  case K_XPDRKEYS: {
+    b->oct_dref = find_dref(kv_get(kv, nkv, "dref"));
+    static const char *kn[8] = { "key0","key1","key2","key3",
+                                 "key4","key5","key6","key7" };
+    for (int i = 0; i < 8; i++) b->xpdr_key[i] = find_cmd(kv_get(kv, nkv, kn[i]));
+    b->xpdr_interval = atof(kv_def(kv, nkv, "key_interval", "0.03"));
+    break;
+  }
   case K_AP:
     b->alt_dref   = find_dref(kv_get(kv, nkv, "alt_dref"));
     b->alt_step   = atof(kv_def(kv, nkv, "alt_step", "100"));
@@ -354,6 +443,8 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
     b->m_large_dec = find_cmd(kv_get(kv, nkv, "large_dec"));
     b->m_small_inc = find_cmd(kv_get(kv, nkv, "small_inc"));
     b->m_small_dec = find_cmd(kv_get(kv, nkv, "small_dec"));
+    b->m_large_hold = atoi(kv_def(kv, nkv, "large_hold", "0"));
+    b->m_small_hold = atoi(kv_def(kv, nkv, "small_hold", "0"));
     b->m_knob      = find_cmd(kv_get(kv, nkv, "knob"));
     b->m_shift     = find_cmd(kv_get(kv, nkv, "shift"));
     b->m_btn_ap    = find_cmd(kv_get(kv, nkv, "btn_AP"));
@@ -382,6 +473,7 @@ static void build_section(const char *section, kv_pair *kv, int nkv) {
   b->sh_large_dec = find_cmd(kv_get(kv, nkv, "shift_large_dec"));
   b->sh_small_inc = find_cmd(kv_get(kv, nkv, "shift_small_inc"));
   b->sh_small_dec = find_cmd(kv_get(kv, nkv, "shift_small_dec"));
+  b->sh_hold      = atoi(kv_def(kv, nkv, "shift_hold", "0"));
 }
 
 static void parse_ini(FILE *f) {
@@ -531,10 +623,10 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
    * held, the rotation drives the shift-knob commands and is consumed, so the
    * function's normal knob action does not also fire. */
   if (cur->shift && (b->sh_large_inc || b->sh_large_dec || b->sh_small_inc || b->sh_small_dec)) {
-    if (L > 0 && b->sh_large_inc)      XPLMCommandOnce(b->sh_large_inc);
-    else if (L < 0 && b->sh_large_dec) XPLMCommandOnce(b->sh_large_dec);
-    if (S > 0 && b->sh_small_inc)      XPLMCommandOnce(b->sh_small_inc);
-    else if (S < 0 && b->sh_small_dec) XPLMCommandOnce(b->sh_small_dec);
+    if (L > 0)      fire_knob(b->sh_large_inc, b->sh_hold);
+    else if (L < 0) fire_knob(b->sh_large_dec, b->sh_hold);
+    if (S > 0)      fire_knob(b->sh_small_inc, b->sh_hold);
+    else if (S < 0) fire_knob(b->sh_small_dec, b->sh_hold);
     L = 0;
     S = 0;
   }
@@ -573,6 +665,20 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
     if (b->oct_dref && (L || S)) {
       int nv = octavi_calc_xpdr(XPLMGetDatai(b->oct_dref), L, S);
       XPLMSetDatai(b->oct_dref, nv);
+    }
+    break;
+
+  case K_XPDRKEYS:
+    /* The dials don't write the code (the GTX328 ignores that) - they set a
+     * target and profile_tick types it on the keypad. Base each detent on the
+     * pending target while a sequence is in flight, else on the live code. */
+    if (b->oct_dref && (L || S)) {
+      for (int i = 0; i < 8; i++) g_xpdr.key[i] = b->xpdr_key[i];
+      g_xpdr.interval = b->xpdr_interval;
+      int base = g_xpdr.have_target ? g_xpdr.target : XPLMGetDatai(b->oct_dref);
+      g_xpdr.target = xpdr_apply(base, L, S);
+      g_xpdr.have_target = 1;
+      if (!g_xpdr.active) xpdr_emit_start(g_xpdr.target);
     }
     break;
 
@@ -630,10 +736,10 @@ void profile_dispatch(int fn, const octavi_report *cur, const octavi_report *pre
       if (S > 0)      cmd_pulse(b->c_small_inc);
       else if (S < 0) cmd_pulse(b->c_small_dec);
     } else {
-      if (L > 0 && b->m_large_inc)      XPLMCommandOnce(b->m_large_inc);
-      else if (L < 0 && b->m_large_dec) XPLMCommandOnce(b->m_large_dec);
-      if (S > 0 && b->m_small_inc)      XPLMCommandOnce(b->m_small_inc);
-      else if (S < 0 && b->m_small_dec) XPLMCommandOnce(b->m_small_dec);
+      if (L > 0)      fire_knob(b->m_large_inc, b->m_large_hold);
+      else if (L < 0) fire_knob(b->m_large_dec, b->m_large_hold);
+      if (S > 0)      fire_knob(b->m_small_inc, b->m_small_hold);
+      else if (S < 0) fire_knob(b->m_small_dec, b->m_small_hold);
     }
 #define PRESS(field, cmd) \
     do { if (cur->field && !prev->field) cmd_down(cmd); \
